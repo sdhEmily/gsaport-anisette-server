@@ -5,7 +5,7 @@ A fork of anisette-v3-server for GSAPort
 ## Run using Docker
 
 ```bash
-docker run -d --restart always --name gsaport-anisette -p 6969:6969 --volume gsaport-anisette_data:/home/Alcoholic/.config/gsaport-anisette/lib/ dadoum/gsaport-anisette-server
+docker run -d --restart always --name gsaport-anisette -p 6969:6969 --volume gsaport-anisette_data:/home/Alcoholic/.config/gsaport-anisette/lib/ ghcr.io/sdhemily/gsaport-anisette-server:latest
 ```
 
 ## Compile using dub
