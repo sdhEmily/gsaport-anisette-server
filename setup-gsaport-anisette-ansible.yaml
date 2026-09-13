@@ -1,5 +1,5 @@
 ---
-- name: Setup anisette-v3
+- name: Setup gsaport-anisette
   hosts: ur.host.ip.addr
   gather_facts: false
   become: True
@@ -33,22 +33,22 @@
         cmd: "loginctl enable-linger rootless"
         creates: /var/lib/systemd/linger/rootless
 
-    - name: Setup anisette-v3 container
+    - name: Setup gsaport-anisette container
       containers.podman.podman_container:
-        name: anisette-v3
-        image: docker.io/dadoum/anisette-v3-server:latest
+        name: gsaport-anisette
+        image: docker.io/dadoum/gsaport-anisette-server:latest
         labels:
           io.containers.autoupdate: registry
-          PODMAN_SYSTEMD_UNIT: pod-anisette-v3.service
+          PODMAN_SYSTEMD_UNIT: pod-gsaport-anisette.service
         state: created
         rm: true
         volume: /home/Alcoholic/.config/anisettev3/lib/
         publish: 6969:6969
       become_user: rootless
 
-    - name: Generate systemd unit file for anisette-v3 container
+    - name: Generate systemd unit file for gsaport-anisette container
       containers.podman.podman_generate_systemd:
-        name: anisette-v3
+        name: gsaport-anisette
         restart_policy: "always"
         container_prefix: "pod"
         new: true
@@ -58,7 +58,7 @@
 
     - name: Ensure anisettev3 container is started and enabled
       ansible.builtin.systemd:
-        name: pod-anisette-v3
+        name: pod-gsaport-anisette
         daemon_reload: true
         state: started
         scope: "user"

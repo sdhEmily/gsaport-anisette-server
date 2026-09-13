@@ -18,14 +18,14 @@ RUN apt-get update && apt-get install --no-install-recommends -y ca-certificates
 
 # Copy build artefacts to run
 WORKDIR /opt/
-COPY --from=builder /opt/anisette-v3-server /opt/anisette-v3-server
+COPY --from=builder /opt/gsaport-anisette-server /opt/gsaport-anisette-server
 
 # Create default provisioning folder
-RUN mkdir -p /opt/anisette-v3/provisioning
+RUN mkdir -p /opt/gsaport-anisette/provisioning
 
 # Setup rootless user which works with the volume mount
 RUN useradd -ms /bin/bash Alcoholic \
- && mkdir /home/Alcoholic/.config/anisette-v3/lib/ -p \
+ && mkdir /home/Alcoholic/.config/gsaport-anisette/lib/ -p \
  && chown -R Alcoholic /home/Alcoholic/ \
  && chmod -R +wx /home/Alcoholic/ \
  && chown -R Alcoholic /opt/ \
@@ -34,4 +34,4 @@ RUN useradd -ms /bin/bash Alcoholic \
 # Run the artefact
 USER Alcoholic
 EXPOSE 6969
-ENTRYPOINT [ "/opt/anisette-v3-server" ]
+ENTRYPOINT [ "/opt/gsaport-anisette-server" ]

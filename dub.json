@@ -1,8 +1,9 @@
 {
-	"name": "anisette-v3-server",
-	"description": "Anisette server implementing SideStore's anisette v3 protocol",
+	"name": "gsaport-anisette-server",
+	"description": "A fork of anisette-v3-server for GSAPort",
 	"authors": [
-		"Dadoum"
+		"Dadoum",
+		"sdhEmily"
 	],
 
 	"dependencies": {

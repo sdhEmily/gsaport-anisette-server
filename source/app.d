@@ -1,10 +1,12 @@
 import core.time;
 import core.memory;
+import core.sync.mutex;
 
 import std.algorithm.searching;
 import std.array;
 import std.base64;
 import std.digest;
+import std.digest.md : md5Of;
 import file = std.file;
 import std.format;
 import std.getopt;
@@ -35,14 +37,67 @@ import provision.androidlibrary;
 __gshared string libraryPath;
 __gshared string provisioningPath;
 
-enum brandingCode = format!"anisette-v3-server v%s"(provisionVersion);
-enum clientInfo = "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+enum brandingCode = format!"gsaport-anisette-server v%s"(provisionVersion);
+enum clientInfo = "<iPod1,1> <iPhone OS;8.6.1.3;12A365> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 enum dsId = -2;
 
 __gshared ADI v1Adi;
 __gshared Device v1Device;
+__gshared Mutex v1IdentityLock;
+__gshared string v1LegacyConfigurationPath;
+__gshared string v1IdentitiesPath;
 
 __gshared Duration timeout;
+
+// ADI's native library keeps its provisioning path and identifier as process-global
+// state.  Switch that state while holding this lock, so identities cannot leak
+// between concurrent requests.
+private Device selectV1Identity(HTTPServerRequest req) {
+	string requestedClientInfo = req.headers.get("X-GSAPort-Client-Info", "");
+
+	// Preserve the original single-machine behaviour for stock V1 clients.
+	if (!requestedClientInfo.length) {
+		v1Adi.provisioningPath = v1LegacyConfigurationPath;
+		v1Adi.identifier = v1Device.adiIdentifier;
+		return v1Device;
+	}
+
+	// An ADI machine is tied to its claimed model, not its spoofed OS version or
+	// physical device UUID.  Keep one persisted machine per claimed model so a
+	// local version change continues to use the same provisioning state.
+	size_t modelEnd = 0;
+	if (requestedClientInfo.length > 2 && requestedClientInfo[0] == '<') {
+		for (size_t index = 1; index < requestedClientInfo.length; index++) {
+			if (requestedClientInfo[index] == '>') {
+				modelEnd = index;
+				break;
+			}
+		}
+	}
+	if (!modelEnd) {
+		v1Adi.provisioningPath = v1LegacyConfigurationPath;
+		v1Adi.identifier = v1Device.adiIdentifier;
+		return v1Device;
+	}
+	string model = requestedClientInfo[1 .. modelEnd];
+	string identityKey = toHexString(md5Of(model)).idup;
+	string identityPath = v1IdentitiesPath.buildPath(identityKey);
+	if (!file.exists(identityPath)) file.mkdirRecurse(identityPath);
+
+	auto device = new Device(identityPath.buildPath("device.json"));
+	if (!device.initialized) {
+		import std.random;
+		import std.range;
+		device.serverFriendlyDescription = requestedClientInfo;
+		device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
+		device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
+		device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
+	}
+
+	v1Adi.provisioningPath = identityPath;
+	v1Adi.identifier = device.adiIdentifier;
+	return device;
+}
 
 int main(string[] args) {
 	debug {
@@ -56,7 +111,7 @@ int main(string[] args) {
 	string hostname = "0.0.0.0";
 	ushort port = 6969;
 
-	string configurationPath = expandTilde("~/.config/anisette-v3");
+	string configurationPath = expandTilde("~/.config/gsaport-anisette");
 
 	string certificateChainPath = null;
 	string privateKeyPath = null;
@@ -95,7 +150,7 @@ int main(string[] args) {
 	libraryPath = configurationPath.buildPath("lib");
 
 	string runtimePath = process.environment.get("RUNTIME_DIRECTORY", process.environment.get("XDG_RUNTIME_DIR", file.getcwd()))
-		.buildPath("anisette-v3");
+		.buildPath("gsaport-anisette");
 
 	provisioningPath = runtimePath.buildPath("provisioning");
 
@@ -133,6 +188,9 @@ int main(string[] args) {
 	// Initializing ADI and machine if it has not already been made.
 	v1Device = new Device(configurationPath.buildPath("device.json"));
 	v1Adi = new ADI(libraryPath);
+	v1IdentityLock = new Mutex;
+	v1LegacyConfigurationPath = configurationPath;
+	v1IdentitiesPath = configurationPath.buildPath("v1-models");
 	v1Adi.provisioningPath = configurationPath;
 
 	if (!v1Device.initialized) {
@@ -195,9 +253,13 @@ class AnisetteService {
 		auto log = getLogger();
 		log.info("[<<] anisette-v1 request");
 		auto time = Clock.currTime();
+		v1IdentityLock.lock();
+		scope(exit) v1IdentityLock.unlock();
+		auto device = selectV1Identity(req);
+		string requestedClientInfo = req.headers.get("X-GSAPort-Client-Info", "");
 
 		if (!v1Adi.isMachineProvisioned(dsId)) {
-			ProvisioningSession provisioningSession = new ProvisioningSession(v1Adi, v1Device);
+			ProvisioningSession provisioningSession = new ProvisioningSession(v1Adi, device);
 			provisioningSession.provision(dsId);
 			log.info("Provisioning done!");
 		}
@@ -212,12 +274,12 @@ class AnisetteService {
 			"X-Apple-I-MD":  Base64.encode(otp.oneTimePassword),
 			"X-Apple-I-MD-M": Base64.encode(otp.machineIdentifier),
 			"X-Apple-I-MD-RINFO": to!string(17106176),
-			"X-Apple-I-MD-LU": v1Device.localUserUUID,
+			"X-Apple-I-MD-LU": device.localUserUUID,
 			"X-Apple-I-SRL-NO": "0",
-			"X-MMe-Client-Info": v1Device.serverFriendlyDescription,
+			"X-MMe-Client-Info": requestedClientInfo.length ? requestedClientInfo : device.serverFriendlyDescription,
 			"X-Apple-I-TimeZone": time.timezone.dstName,
 			"X-Apple-Locale": "en_US",
-			"X-Mme-Device-Id": v1Device.uniqueDeviceIdentifier,
+			"X-Mme-Device-Id": device.uniqueDeviceIdentifier,
 		];
 
 		res.headers["Implementation-Version"] = brandingCode;
@@ -229,7 +291,7 @@ class AnisetteService {
 	@path("/v3/client_info")
 	void getClientInfo(HTTPServerRequest req, HTTPServerResponse res) {
 		auto log = getLogger();
-		log.info("[<<] anisette-v3 /v3/client_info");
+		log.info("[<<] gsaport-anisette /v3/client_info");
 		JSONValue responseJson = [
 			"client_info": clientInfo,
 			"user_agent": "akd/1.0 CFNetwork/808.1.4"
@@ -243,7 +305,7 @@ class AnisetteService {
 	@path("/v3/get_headers")
 	void getHeaders(HTTPServerRequest req, HTTPServerResponse res) {
 		auto log = getLogger();
-		log.info("[<<] anisette-v3 /v3/get_headers");
+		log.info("[<<] gsaport-anisette /v3/get_headers");
 		string identifier = "(null)";
 		string tmpProvisioningPath;
 		try {
@@ -282,14 +344,14 @@ class AnisetteService {
 			];
 			res.headers["Implementation-Version"] = brandingCode;
 			res.writeBody(response.toString(JSONOptions.doNotEscapeSlashes), "application/json");
-			log.info("[>>] anisette-v3 /v3/get_headers OK.");
+			log.info("[>>] gsaport-anisette /v3/get_headers OK.");
 		} catch (Throwable t) {
 			JSONValue error = [
 				"result": "GetHeadersError",
 				"message": typeid(t).name ~ ": " ~ t.msg
 			];
 			res.headers["Implementation-Version"] = brandingCode;
-			log.info("[>>] anisette-v3 /v3/get_headers error.");
+			log.info("[>>] gsaport-anisette /v3/get_headers error.");
 			res.writeBody(error.toString(JSONOptions.doNotEscapeSlashes), "application/json");
 		} finally {
 			if (file.exists(tmpProvisioningPath)) {
@@ -305,7 +367,7 @@ class AnisetteService {
 		scope(exit) socket.close();
 
 		auto requestUUID = randomUUID().toString(); // Assign a random UUID to the request to make it easier to track.
-		log.infoF!"[<< %s] anisette-v3 /v3/provisionSession connected."(requestUUID);
+		log.infoF!"[<< %s] gsaport-anisette /v3/provisionSession connected."(requestUUID);
 
 		JSONValue giveIdentifier = [
 			"result": "GiveIdentifier"
@@ -395,7 +457,7 @@ class AnisetteService {
 				"result": "StartProvisioningError",
 				"message": format!"%s (request id: %s)"(ex.msg, requestUUID)
 			];
-			log.errorF!"[>> %s] anisette-v3 error: %s"(requestUUID, ex);
+			log.errorF!"[>> %s] gsaport-anisette error: %s"(requestUUID, ex);
 			socket.send(error.toString());
 			return;
 		}
@@ -432,7 +494,7 @@ class AnisetteService {
 				"result": "EndProvisioningError",
 				"message": format!"%s (request id: %s)"(ex.msg, requestUUID)
 			];
-			log.errorF!"[>> %s] anisette-v3 error: %s"(requestUUID, ex);
+			log.errorF!"[>> %s] gsaport-anisette error: %s"(requestUUID, ex);
 			socket.send(error.toString());
 			return;
 		}
