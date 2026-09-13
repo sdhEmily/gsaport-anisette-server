@@ -40,6 +40,8 @@ __gshared string provisioningPath;
 enum brandingCode = format!"gsaport-anisette-server v%s"(provisionVersion);
 enum clientInfo = "<iPod1,1> <iPhone OS;8.6.1.3;12A365> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 enum dsId = -2;
+enum mapKeySecret = "674822be7c2573ea82ff68e5579f4e5ea770b36609fe7ffe04d983de57fb9607";
+enum mapKeyClockSkewSeconds = 300;
 
 __gshared ADI v1Adi;
 __gshared Device v1Device;
@@ -48,6 +50,63 @@ __gshared string v1LegacyConfigurationPath;
 __gshared string v1IdentitiesPath;
 
 __gshared Duration timeout;
+
+private bool constantTimeEquals(string left, string right) {
+	if (left.length != right.length) return false;
+	uint difference = 0;
+	foreach (index; 0 .. left.length) difference |= cast(ubyte)(left[index] ^ right[index]);
+	return difference == 0;
+}
+
+private bool hasValidGSAPortSignature(HTTPServerRequest req) {
+	string deviceUUID = req.headers.get("X-Device-Uuid", "");
+	string suppliedPK = req.headers.get("pk", "");
+	string suppliedPodkey = req.headers.get("podkey", "");
+	if (!deviceUUID.length || !suppliedPK.length || !suppliedPodkey.length) return false;
+
+	size_t separator = suppliedPodkey.length;
+	foreach (index, character; suppliedPodkey) {
+		if (character == '_') {
+			separator = index;
+			break;
+		}
+	}
+	if (separator == 0 || separator + 1 >= suppliedPodkey.length) return false;
+
+	long timestamp = 0;
+	foreach (character; suppliedPodkey[0 .. separator]) {
+		if (character < '0' || character > '9') return false;
+		int digit = character - '0';
+		if (timestamp > (long.max - digit) / 10) return false;
+		timestamp = timestamp * 10 + digit;
+	}
+
+	import std.datetime.systime : Clock;
+	long now = Clock.currTime().toUnixTime();
+	if (timestamp < now - mapKeyClockSkewSeconds || timestamp > now + mapKeyClockSkewSeconds) return false;
+
+	uint timestamp32 = cast(uint) timestamp;
+	ubyte[4] timestampBytes = [
+		cast(ubyte)(timestamp32 & 0xFF),
+		cast(ubyte)((timestamp32 >> 8) & 0xFF),
+		cast(ubyte)((timestamp32 >> 16) & 0xFF),
+		cast(ubyte)((timestamp32 >> 24) & 0xFF),
+	];
+
+	string signedPath = "icloud.podpod123.com/anisette.php?" ~ deviceUUID;
+	ubyte[] round1Input = timestampBytes[].dup;
+	round1Input ~= cast(const(ubyte)[]) signedPath;
+	round1Input ~= cast(const(ubyte)[]) mapKeySecret;
+	auto round1 = md5Of(round1Input);
+
+	ubyte[] round2Input;
+	round2Input ~= cast(const(ubyte)[]) mapKeySecret;
+	round2Input ~= round1[];
+	string expectedPodkey = format("%d_%s", timestamp, toHexString(md5Of(round2Input)).toLower());
+	string expectedPK = toHexString(md5Of(deviceUUID)).toLower().idup;
+	return constantTimeEquals(suppliedPK, expectedPK)
+		&& constantTimeEquals(suppliedPodkey, expectedPodkey);
+}
 
 // ADI's native library keeps its provisioning path and identifier as process-global
 // state.  Switch that state while holding this lock, so identities cannot leak
@@ -252,6 +311,11 @@ class AnisetteService {
 		import core.time;
 		auto log = getLogger();
 		log.info("[<<] anisette-v1 request");
+		if (!hasValidGSAPortSignature(req)) {
+			log.warn("[>>] 403 Forbidden: invalid GSAPort request signature");
+			res.writeBody("Forbidden", 403, "text/plain");
+			return;
+		}
 		auto time = Clock.currTime();
 		v1IdentityLock.lock();
 		scope(exit) v1IdentityLock.unlock();
