@@ -93,7 +93,8 @@ private bool hasValidGSAPortSignature(HTTPServerRequest req) {
 		cast(ubyte)((timestamp32 >> 24) & 0xFF),
 	];
 
-	string signedPath = "icloud.podpod123.com/anisette.php?" ~ deviceUUID;
+	string signedPathBase = process.environment.get("GSAPORT_URL", "icloud.podpod123.com/anisette.php");
+	string signedPath = signedPathBase ~ "?" ~ deviceUUID;
 	ubyte[] round1Input = timestampBytes[].dup;
 	round1Input ~= cast(const(ubyte)[]) signedPath;
 	round1Input ~= cast(const(ubyte)[]) mapKeySecret;
@@ -113,33 +114,19 @@ private bool hasValidGSAPortSignature(HTTPServerRequest req) {
 // between concurrent requests.
 private Device selectV1Identity(HTTPServerRequest req) {
 	string requestedClientInfo = req.headers.get("X-GSAPort-Client-Info", "");
+	string deviceUUID = req.headers.get("X-Device-Uuid", "");
 
 	// Preserve the original single-machine behaviour for stock V1 clients.
-	if (!requestedClientInfo.length) {
+	if (!requestedClientInfo.length || !deviceUUID.length) {
 		v1Adi.provisioningPath = v1LegacyConfigurationPath;
 		v1Adi.identifier = v1Device.adiIdentifier;
 		return v1Device;
 	}
 
-	// An ADI machine is tied to its claimed model, not its spoofed OS version or
-	// physical device UUID.  Keep one persisted machine per claimed model so a
-	// local version change continues to use the same provisioning state.
-	size_t modelEnd = 0;
-	if (requestedClientInfo.length > 2 && requestedClientInfo[0] == '<') {
-		for (size_t index = 1; index < requestedClientInfo.length; index++) {
-			if (requestedClientInfo[index] == '>') {
-				modelEnd = index;
-				break;
-			}
-		}
-	}
-	if (!modelEnd) {
-		v1Adi.provisioningPath = v1LegacyConfigurationPath;
-		v1Adi.identifier = v1Device.adiIdentifier;
-		return v1Device;
-	}
-	string model = requestedClientInfo[1 .. modelEnd];
-	string identityKey = toHexString(md5Of(model)).idup;
+	// A provisioned ADI machine belongs to one physical device, even when
+	// several devices deliberately claim the same model (for example iPod1,1).
+	// The signature gate above authenticates this UUID before it selects state.
+	string identityKey = toHexString(md5Of(deviceUUID)).idup;
 	string identityPath = v1IdentitiesPath.buildPath(identityKey);
 	if (!file.exists(identityPath)) file.mkdirRecurse(identityPath);
 
@@ -322,7 +309,8 @@ class AnisetteService {
 		auto device = selectV1Identity(req);
 		string requestedClientInfo = req.headers.get("X-GSAPort-Client-Info", "");
 
-		if (!v1Adi.isMachineProvisioned(dsId)) {
+		bool freshIdentity = !v1Adi.isMachineProvisioned(dsId);
+		if (freshIdentity) {
 			ProvisioningSession provisioningSession = new ProvisioningSession(v1Adi, device);
 			provisioningSession.provision(dsId);
 			log.info("Provisioning done!");
@@ -347,6 +335,7 @@ class AnisetteService {
 		];
 
 		res.headers["Implementation-Version"] = brandingCode;
+		if (freshIdentity) res.headers["X-GSAPort-Fresh-Identity"] = "1";
 		res.writeBody(responseJson.toString(JSONOptions.doNotEscapeSlashes), "application/json");
 		log.infoF!"[>>] 200 OK %s"(responseJson);
 	}
