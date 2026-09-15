@@ -36,7 +36,7 @@
     - name: Setup gsaport-anisette container
       containers.podman.podman_container:
         name: gsaport-anisette
-        image: docker.io/dadoum/gsaport-anisette-server:latest
+        image: ghcr.io/sdhemily/gsaport-anisette-server:latest
         labels:
           io.containers.autoupdate: registry
           PODMAN_SYSTEMD_UNIT: pod-gsaport-anisette.service
